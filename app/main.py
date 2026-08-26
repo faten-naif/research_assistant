@@ -2,6 +2,8 @@ import utils
 import arxiv
 from download_arxiv import donwload_papers
 from pdf_parser import parsing_papers
+from rag import chunk
+from milvus_db import setup_milvus
 import config
 import logging
 from pathlib import Path
@@ -34,7 +36,7 @@ def call_arxiv(page_size, topics, date_limit, max_results=100):
     
 
 
-def process_query(page_size, topics, date_limit, max_results):
+def process_query(page_size, topics, date_limit, max_results,milvus_client):
     """
     Process download and parsing requests.
     Args:
@@ -42,6 +44,7 @@ def process_query(page_size, topics, date_limit, max_results):
         topics: (str) search query.
         date_limit: (str) date and time filter of query results.
         max_results: (int) number of retrived relevent papers.
+        milvus_client: (MilvusClient) milvus object to manage the database.
     """
     # retrive metadata of relevent paper to user query.
     metadata_file = call_arxiv(page_size, topics, date_limit, max_results)
@@ -52,6 +55,16 @@ def process_query(page_size, topics, date_limit, max_results):
     donwload_papers(metadata_file, papers_dir)
     # PDFs parsing.
     parsing_papers(metadata_file,papers_dir)
+    # chunking.
+    chunks, chunked_file_name = chunk()
+    print(f"chunked: {len(chunks)}, File name: {chunked_file_name}")
+    # insert into vector db.
+    # open the chunked_file_name, instead of returning the file name return the json.
+    records_len = milvus_client.insert(chunks)
+    print(f"{records_len} has been inserted")
+    
+    
+    
 
 
 def setup():
@@ -62,14 +75,17 @@ def setup():
     print("IMAGES exist") if Path(config.DIRECTORY["IMAGES"]).exists() else Path(config.DIRECTORY["IMAGES"]).mkdir()
     print("PAPERS_DIR exist") if Path(config.DIRECTORY["PAPERS_DIR"]).exists() else Path(config.DIRECTORY["PAPERS_DIR"]).mkdir()
     utils.logs()
+    # setup the connection, collection and embedding model.
+    milvus_client = setup_milvus()
+    return milvus_client
     
 if __name__ == "__main__":
-    setup()
+    milvus_client = setup()
     page_size = 10
     topics = "AI"
     date_limit = "202401010600 TO 202606010600"
-    max_results = 10
-    process_query(page_size, topics, date_limit, max_results)
+    max_results = 2
+    process_query(page_size, topics, date_limit, max_results,milvus_client)
 
 
 
