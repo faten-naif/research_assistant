@@ -6,7 +6,7 @@ import logging
 import datetime
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-
+import requests
 logger = logging.getLogger(__name__)
 
 
@@ -24,10 +24,9 @@ class Milvus:
         #self.token_limit: Optional[int] = None
         self.db_name: str = config.VECTOR_DB["DB_NAME"]
         self.collection_name: str = config.VECTOR_DB["COLLECTION_NAME"]
-        self.embedding_model: str = config.VECTOR_DB["EMBEDDING_MODEL"]
         self.env: str = config.ENV
-        self.embedding_dim: int = config.VECTOR_DB["EMBEDDING_DIM"]
-        
+        self.embedding_dim: int = config.EMBEDDING["EMBEDDING_DIM"]
+        self.embedding_api = f"http://{config.EMBEDDING['HOST']}:{config.EMBEDDING['PORT']}/v1"
         logger.info(f"MilvusClient initialized: host={self.host}, db={self.db_name}, collection={self.collection_name}")
     
     @property
@@ -53,21 +52,6 @@ class Milvus:
         
         return self
     
-    def setup_embedding(self) -> 'MilvusClient':
-        """
-        Initialize embedding model.
-        Returns self for method chaining.
-        """
-        try:
-            self.model = SentenceTransformer(self.embedding_model)
-            config_obj = AutoConfig.from_pretrained(self.embedding_model)
-            self.token_limit = config_obj.max_position_embeddings
-            logger.info(f"Embedding model loaded: {self.embedding_model} (tokens_limit={self.token_limit})")
-        except Exception as e:
-            logger.error(f"Failed to load embedding model: {e}")
-            raise
-        
-        return self
     
     def setup_collection(self) -> 'MilvusClient':
         """
@@ -121,7 +105,18 @@ class Milvus:
         if self.client.has_collection(collection_name=self.collection_name):
             return self.client.describe_collection(collection_name=self.collection_name)
         return None
-    
+    def embedding_request(self, data:List) -> List:
+        """Post request to convert list of text to embeddings"""
+        try:
+            response = requests.post(embedding_api,json={"payload":data})
+            if response:
+                return response.json()
+        except requests.exceptions.HTTPError as e:
+            return {
+                "status_code": 500,
+                "message": str(e)  
+            }
+        
     def insert(self, data: List[Dict[str, Any]], enable_dynamic: bool = True) -> int:
         """
         Insert records into the collection.
@@ -143,26 +138,31 @@ class Milvus:
             title = record.get("title", "")
             content = record.get("content", "")
             # convert chunk and paper title to embeddings.
-            title_embedding,content_embedding = self.model.encode([title,content]).tolist()
+            response = embedding_request([title,content])
             
-            records.append({
-                "title": title, 
-                "content": content,
-                "title_embedding": title_embedding, 
-                "content_embedding": content_embedding,
-                "inserted_at":str(datetime.datetime.today())
-            })
-        
-        # Insert using MilvusClient insert method
-        result = self.client.insert(
-            collection_name=self.collection_name,
-            data=records,
-            enable_dynamic_field=enable_dynamic
-        )
-        self.client.flush(collection_name=self.collection_name)
-
-        logger.info(f"Inserted {len(records)} records into {self.collection_name}")
-        return len(records)
+            if response["status"] == 200:
+                title_embedding,content_embedding = response["embeddings"]
+                records.append({
+                    "title": title, 
+                    "content": content,
+                    "title_embedding": title_embedding, 
+                    "content_embedding": content_embedding,
+                    "inserted_at":str(datetime.datetime.today())
+                })
+            
+            # Insert using MilvusClient insert method
+            result = self.client.insert(
+                collection_name=self.collection_name,
+                data=records,
+                enable_dynamic_field=enable_dynamic
+            )
+            self.client.flush(collection_name=self.collection_name)
+    
+            logger.info(f"Inserted {len(records)} records into {self.collection_name}")
+            return len(records)
+            
+        logger.error(f"{Path(__file__).stem}: embedding request failed {response['message']}")
+        return 0
 # it uses filttering to get the results not embedding
     def query(
         self,
@@ -201,7 +201,7 @@ class Milvus:
         limit: int = 10,
         output_fields: Optional[List[str]] = None,
         filter_: Optional[str] = None,
-        search_field: str = "content_embedding"
+        search_field: str = "content"
     ) -> List[Dict[str, Any]]:
         """
         Search using vector similarity.
@@ -216,31 +216,35 @@ class Milvus:
         Returns:
             List of results with distance scores
         """
-        query_vector = self.model.encode(query).tolist()
+        response = embedding_request([query])
         output_fields = output_fields or ["title", "content"]
         
         search_params = {
             "metric_type": "COSINE",
             "params": {"nprobe": 128},
         }
-        
-        search_results = self.client.search(
-            collection_name=self.collection_name,
-            data=[query_vector],
-            anns_field=search_field,
-            limit=limit,
-            output_fields=output_fields,
-            filter=filter_,
-            search_params=search_params
-        )
-        
-        # Format results with distances
-        results = []
-        for i, result in enumerate(search_results[0] if search_results else []):
-            # dynamic output to adapt to output_fields.
-            results.append({k:result.get(k) for k in output_fields})
-        
-        return results
+        if response["status"] == 200:
+            query_vector = response["embeddings"]
+            search_results = self.client.search(
+                collection_name=self.collection_name,
+                data=query_vector,
+                anns_field=search_field,
+                limit=limit,
+                output_fields=output_fields,
+                filter=filter_,
+                search_params=search_params
+            )
+            
+            # Format results with distances
+            results = []
+            for i, result in enumerate(search_results[0] if search_results else []):
+                # dynamic output to adapt to output_fields.
+                results.append({k:result.get(k) for k in output_fields})
+            
+            return results
+        logger.error(f"{Path(__file__).stem}: embedding request failed {response['message']}")
+        return []
+            
     
     def delete(self, ids: Optional[List[int]] = None, filter_: Optional[str] = None) -> int:
         """
@@ -341,8 +345,6 @@ def setup_milvus() -> MilvusClient:
     """
     client = Milvus()
     client.setup_connection()
-    # TOOD: embedding should be served though an API.
-    client.setup_embedding()
     client.setup_collection()
     return client
 
@@ -355,7 +357,9 @@ if __name__ == "__main__":
     # Get stats
     stats = client.get_stats()
     print(f"Collection stats: {stats}")
-    
+
+    response = requests.get("http://127.0.0.1:8004/health")
+    print(response.json())
     # Query
     results = client.query(limit=5)
     print(f"Query results: {results}")
