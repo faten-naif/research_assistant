@@ -28,12 +28,19 @@ VECTOR_DB = {
     "DB_NAME":"arxiv_db",
     "COLLECTION_NAME":"papers_text",
     "EMBEDDING_MODEL":"Qwen/Qwen3-Embedding-0.6B",
-    "EMBEDDING_DIM": 1024,
     
 }
 
 ENV = "PROD"
-
+EMBEDDING = {
+    "MODEL_NAME":"Qwen/Qwen3-Embedding-0.6B",
+    "HOST":"127.0.0.1",
+    "PORT":8004,
+    "BACKEND":"openvino",
+    "NORMALIZE":True,
+    "EMBEDDING_DIM":1024,
+    
+}
 # LLM serving
 # Embedding serving.
 # VECTOR_DB = {
