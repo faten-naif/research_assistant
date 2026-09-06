@@ -150,11 +150,13 @@ def pdf_extraction(title):
         reference_page_check = is_reference(page_data)
         # concat reference_check dict to the page_data
         page_data = page_data | reference_page_check
-        extracted_pages.append(page_data)
-        total_images+=page_data["images_no"]
-        total_tables+=page_data["tables_no"]
         if page_data["is_reference"]:
             reference_pages.append(page_num)
+        else:
+            extracted_pages.append(page_data)
+            total_images+=page_data["images_no"]
+            total_tables+=page_data["tables_no"]
+        
         # TODO: ADD REFERENCE START AND REFERENCE END
     return extracted_pages,total_images,total_tables,reference_pages
     
