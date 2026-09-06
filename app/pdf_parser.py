@@ -4,6 +4,7 @@ import time
 import config
 import logging
 from pathlib import Path
+import re
 # responsible for the extraction of the papers and storing as json file. 
 # best to start the experiment with RAG with one paper.
 
@@ -54,6 +55,7 @@ def pdf_extraction(title):
     # store metadata about the paper.
     total_images = 0
     total_tables = 0
+    reference_pages = []
     # iterate through the pages.
     for page_num, page in enumerate(doc):
         drawing_counter = 0
@@ -145,12 +147,60 @@ def pdf_extraction(title):
             page_text+= "".join(right_blocks)
         # add the extracted page with its metadata to the list.
         page_data = {"page_no": page_num, "content": page_text,"images_no":image_counter+drawing_counter,"tables_no":len(table_rects)}
+        reference_page_check = is_reference(page_data)
+        # concat reference_check dict to the page_data
+        page_data = page_data | reference_page_check
         extracted_pages.append(page_data)
         total_images+=page_data["images_no"]
         total_tables+=page_data["tables_no"]
+        if page_data["is_reference"]:
+            reference_pages.append(page_num)
+        # TODO: ADD REFERENCE START AND REFERENCE END
+    return extracted_pages,total_images,total_tables,reference_pages
     
-    return extracted_pages,total_images,total_tables
+def is_reference(page_data):
+    # the reference pages usually has no images or tables.
+    non_text_num = page_data["images_no"] + page_data["tables_no"]
+    text = page_data["content"]
+    DOI_PATTERN = re.compile(
+    r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b",
+    re.IGNORECASE
+    )
+    DOI_URL_PATTERN = re.compile(
+        r"https?://doi\.org/10\.\d{4,9}/\S+",
+        re.IGNORECASE
+    )
     
+    NUMBERED_REFERENCE_PATTERN = re.compile(
+        r"^\s*(?:\[\d+\]|\d+\.)\s+"
+    )
+    
+    AUTHOR_YEAR_PATTERN = re.compile(
+        r"\b[A-Z][a-zA-Z'-]+(?:\s+et\s+al\.)?.*?\((?:19|20)\d{2}[a-z]?\)"
+    )
+
+
+    numbered_refs = sum(bool(NUMBERED_REFERENCE_PATTERN.match(line)) 
+                        for line in text.splitlines())
+
+
+    doi_count = len(DOI_PATTERN.findall(text))
+    doi_url_count = len(DOI_URL_PATTERN.findall(text))
+    author_year_count = len(AUTHOR_YEAR_PATTERN.findall(text))
+    total_signals = numbered_refs+doi_count+doi_url_count+author_year_count - (non_text_num)
+    # TODO: NEED TO TEST, what if the page has only one reference
+    THRESHOLD = 5
+
+    return {
+        "reference_scores":{
+            "numbered_references": numbered_refs,
+            "doi_count": doi_count,
+            "doi_url_count": doi_url_count,
+            "author_year_patterns": author_year_count},
+        "total_signals":total_signals,
+        "is_reference": total_signals >= THRESHOLD
+        }
+
 
 def parsing_papers(metadata_file,papers_dir):
     """
@@ -165,8 +215,8 @@ def parsing_papers(metadata_file,papers_dir):
         for paper in papers:
             paper_path = Path(papers_dir,paper['title']+".pdf").joinpath()
             print(paper_path)
-            paper_content,total_images, total_tables = pdf_extraction(paper_path)
-            papers_content.append({"title":paper['title'], "content": paper_content, "pages_no": len(paper_content), "images_no":total_images, "tables_no":total_tables})
+            paper_content,total_images, total_tables,reference_pages = pdf_extraction(paper_path)
+            papers_content.append({"title":paper['title'], "content": paper_content, "pages_no": len(paper_content), "images_no":total_images, "tables_no":total_tables,"reference_pages":reference_pages})
         logger.info("successfully parsed all PDFs")
     except pymupdf.FileNotFoundError as e:
         logger.error(f"{Path(__file__).stem}: {e}")
