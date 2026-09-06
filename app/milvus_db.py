@@ -108,7 +108,7 @@ class Milvus:
     def embedding_request(self, data:List) -> List:
         """Post request to convert list of text to embeddings"""
         try:
-            response = requests.post(embedding_api,json={"payload":data})
+            response = requests.post(self.embedding_api,json={"payload":data})
             if response:
                 return response.json()
         except requests.exceptions.HTTPError as e:
@@ -138,9 +138,9 @@ class Milvus:
             title = record.get("title", "")
             content = record.get("content", "")
             # convert chunk and paper title to embeddings.
-            response = embedding_request([title,content])
+            response = self.embedding_request([title,content])
             
-            if response["status"] == 200:
+            if response["status_code"] == 200:
                 title_embedding,content_embedding = response["embeddings"]
                 records.append({
                     "title": title, 
@@ -201,7 +201,7 @@ class Milvus:
         limit: int = 10,
         output_fields: Optional[List[str]] = None,
         filter_: Optional[str] = None,
-        search_field: str = "content"
+        search_field: str = "content_embedding"
     ) -> List[Dict[str, Any]]:
         """
         Search using vector similarity.
@@ -216,14 +216,15 @@ class Milvus:
         Returns:
             List of results with distance scores
         """
-        response = embedding_request([query])
-        output_fields = output_fields or ["title", "content"]
+        response = self.embedding_request([query])
+        output_fields = output_fields or ["title", "content","distance"]
         
         search_params = {
             "metric_type": "COSINE",
             "params": {"nprobe": 128},
         }
-        if response["status"] == 200:
+        results = []
+        if response["status_code"] == 200:
             query_vector = response["embeddings"]
             search_results = self.client.search(
                 collection_name=self.collection_name,
@@ -236,14 +237,13 @@ class Milvus:
             )
             
             # Format results with distances
-            results = []
+            
             for i, result in enumerate(search_results[0] if search_results else []):
                 # dynamic output to adapt to output_fields.
                 results.append({k:result.get(k) for k in output_fields})
-            
-            return results
-        logger.error(f"{Path(__file__).stem}: embedding request failed {response['message']}")
-        return []
+        else:
+            logger.error(f"{Path(__file__).stem}: embedding request failed {response['message']}")
+        return results
             
     
     def delete(self, ids: Optional[List[int]] = None, filter_: Optional[str] = None) -> int:
@@ -361,6 +361,6 @@ if __name__ == "__main__":
     response = requests.get("http://127.0.0.1:8004/health")
     print(response.json())
     # Query
-    results = client.query(limit=5)
+    results = client.search(query="RAG")
     print(f"Query results: {results}")
 
