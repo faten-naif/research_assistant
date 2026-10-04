@@ -1,236 +1,355 @@
-import pymupdf  # PyMuPDF
-import utils
+import utils as utils
 import time
-import config
+import config as config
 import logging
 from pathlib import Path
 import re
-# responsible for the extraction of the papers and storing as json file. 
-# best to start the experiment with RAG with one paper.
+from tqdm import tqdm
+import math
+from grobid_client.grobid_client import GrobidClient
+from lxml import etree as ET 
+# responsible for the extraction of the papers and storing them as json file. 
 
 logger = logging.getLogger(__name__)
 
-
-def table_extraction(page):
-    tables = page.find_tables()
-    table_rects = []
-    table_blocks = []
-    for i, table in enumerate(tables):
-        # Remember where the table is, to prevent drawing overlaps
-        table_rects.append(pymupdf.Rect(table.bbox))
-        table_blocks.append({"type": 3, "bbox": table.bbox, "markdown": table.to_markdown()})
-        
-    return table_blocks, table_rects
-
-def drawing_extraction(page):
-    drawing_blocks = []
-    drawings_rects = []
-    drawing_clusters = page.cluster_drawings(x_tolerance=10, y_tolerance=10)
-    for cluster_bbox in drawing_clusters:
-        # Filter out negligible marks (e.g. tiny bullet points, single underscores)
-        if cluster_bbox.is_empty or (cluster_bbox.x1 - cluster_bbox.x0 < 15 or cluster_bbox.y1 - cluster_bbox.y0 < 15):
-            continue
-        cluster_text = page.get_text("text", clip=cluster_bbox).strip()
-        if len(cluster_text) < 60:
-            continue
-        bbox = (
-                cluster_bbox.x0,
-                cluster_bbox.y0,
-                cluster_bbox.x1,
-                cluster_bbox.y1,
-            )
-        drawings_rects.append(pymupdf.Rect(bbox))
-        drawing_blocks.append({
-            "type": 2,
-            "bbox":bbox ,
-
-        })
-    return drawing_blocks, drawings_rects
-
-def pdf_extraction(title):
-    # open the pdf file.
-    doc = pymupdf.open(title)
-    # store the extracted pages
-    extracted_pages = []
-    # store metadata about the paper.
-    total_images = 0
-    total_tables = 0
-    reference_pages = []
-    # iterate through the pages.
-    for page_num, page in enumerate(doc):
-        drawing_counter = 0
-        image_counter = 0
-        
-        page_content= page.get_text("dict")
-        all_blocks = list(page_content["blocks"])
-        table_blocks, table_rects = table_extraction(page)
-        # concate tables to the text blocks.
-        all_blocks+= table_blocks 
-        
-        # add the drawings blocks to the list of contents.
-        drawing_blocks, drawings_rect = drawing_extraction(page)
-        # concate drawings blocks.
-        all_blocks+= drawing_blocks
-        # sort blocks, to maintain the original document flow.
-        sorted_blocks = sorted(
-            all_blocks, key=lambda b: (b["bbox"][1], b["bbox"][0])
-        )
-        
-        print(f"Page_num: {page_num}")
-        # find the width of the page, 
-        mid_x = page.rect.width / 2
-        # first: detect if the block is double or single column. if it passes the middle point then single if not then double.
-        
-        left_blocks = []
-        right_blocks = []
-        for block in sorted_blocks:
-            
-            block_text = ""
-            block_type = block["type"]
-            x0,_,x1,_ = block["bbox"]
-            block_rect = pymupdf.Rect(block["bbox"])
-            # check the layout of the page.
-            is_double = False
-            if x0 > mid_x or x1 < mid_x:
-                is_double = True
-            # ----------------------------------------------------------
-            # Table block (already extracted as markdown)
-            # ----------------------------------------------------------
-            if block_type == 3:
-                block_text += block["markdown"]
-            else:
-                # Skip text/images contained inside detected tables
-                if any(block_rect.intersects(table_rect) for table_rect in table_rects):
-                    continue
-                # ---------------- Text ----------------
-                if block_type == 0:
-                    # the table might be extracted as text even though it was added as table.
-                    # so, if there is overlap between the text and table boxes, skip.
-                    for line in block["lines"]:
-                        for spans in line["spans"]:
-                            block_text+=spans["text"]
-                        block_text+="\n"
-                        
-                # ---------------- Image ----------------
-                elif block_type == 1:
-                    #print(block)
-                    img_name = f"image_{image_counter}_page{page_num}.{block['ext']}"
-                    block_text+=f"\n[IMAGE] {img_name}\n"
-                    with open(Path(config.DIRECTORY["IMAGES"],img_name).joinpath(), "wb") as f:
-                        f.write(block["image"])
-                    image_counter+=1
-                    
-                # ---------------- Drawings ----------------
-                elif block_type == 2:
-                    graph_name = f"vector_graph_{drawing_counter}_page{page_num}.png"
-                    block_text += f"\n[GRAPH/DRAWING] {graph_name}\n"
-        
-                    clip_rect = pymupdf.Rect(block["bbox"])
-                    pix = page.get_pixmap(clip=clip_rect, dpi=150)
-                    pix.save(Path(config.DIRECTORY["IMAGES"],graph_name).joinpath())
-                    drawing_counter += 1
-                    
-            # ---------------- Layout ----------------
-            # research papers could be single or double columns, if single add to the left (English text)
-            if is_double:
-            
-                if x1 < mid_x:
-                    left_blocks.append(block_text)
-                elif x0 > mid_x:
-                    right_blocks.append(block_text)
-            else:
-                left_blocks.append(block_text)
-
-        # prepare the output.
-        page_text = "".join(left_blocks)
-        if len(right_blocks) > 0:
-            page_text+= "".join(right_blocks)
-        # add the extracted page with its metadata to the list.
-        page_data = {"page_no": page_num, "content": page_text,"images_no":image_counter+drawing_counter,"tables_no":len(table_rects)}
-        reference_page_check = is_reference(page_data)
-        # concat reference_check dict to the page_data
-        page_data = page_data | reference_page_check
-        if page_data["is_reference"]:
-            reference_pages.append(page_num)
-        else:
-            extracted_pages.append(page_data)
-            total_images+=page_data["images_no"]
-            total_tables+=page_data["tables_no"]
-        
-        # TODO: ADD REFERENCE START AND REFERENCE END
-    return extracted_pages,total_images,total_tables,reference_pages
-    
-def is_reference(page_data):
-    # the reference pages usually has no images or tables.
-    non_text_num = page_data["images_no"] + page_data["tables_no"]
-    text = page_data["content"]
-    DOI_PATTERN = re.compile(
-    r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+\b",
-    re.IGNORECASE
-    )
-    DOI_URL_PATTERN = re.compile(
-        r"https?://doi\.org/10\.\d{4,9}/\S+",
-        re.IGNORECASE
-    )
-    
-    NUMBERED_REFERENCE_PATTERN = re.compile(
-        r"^\s*(?:\[\d+\]|\d+\.)\s+"
-    )
-    
-    AUTHOR_YEAR_PATTERN = re.compile(
-        r"\b[A-Z][a-zA-Z'-]+(?:\s+et\s+al\.)?.*?\((?:19|20)\d{2}[a-z]?\)"
-    )
-
-
-    numbered_refs = sum(bool(NUMBERED_REFERENCE_PATTERN.match(line)) 
-                        for line in text.splitlines())
-
-
-    doi_count = len(DOI_PATTERN.findall(text))
-    doi_url_count = len(DOI_URL_PATTERN.findall(text))
-    author_year_count = len(AUTHOR_YEAR_PATTERN.findall(text))
-    total_signals = numbered_refs+doi_count+doi_url_count+author_year_count - (non_text_num)
-    # TODO: NEED TO TEST, what if the page has only one reference
-    THRESHOLD = 5
-
-    return {
-        "reference_scores":{
-            "numbered_references": numbered_refs,
-            "doi_count": doi_count,
-            "doi_url_count": doi_url_count,
-            "author_year_patterns": author_year_count},
-        "total_signals":total_signals,
-        "is_reference": total_signals >= THRESHOLD
-        }
-
-
-def parsing_papers(metadata_file,papers_dir):
+#################################### Metadata ####################################
+def get_authors(authors_elem, ns):
     """
-    Parse PDFs to JSON for vector database ingestion.
-    Args:
-        metadata_file: (str) path of json metadata file retrived from arxiv.
-        papers_dir: (str) location of stored PDFs.
+    Retrive the paper authors' names
+    input: 
+        authors_elem: (list) of lxml elements.
+        ns: (dict) of namespaces.
+    returns: 
+        list of authors full name or empty.
     """
+    authors_list = []
+    for elem in authors_elem:
+        # Find nested components using your namespace
+        forename = elem.findtext('./tei:forename', default='', namespaces=ns).strip()
+        surname = elem.findtext('./tei:surname', default='', namespaces=ns).strip()
+        authors_list.append({"forename":forename,"surname":surname})
+    return authors_list
+    
+def get_keywords(keywords_elem, ns):
+    """
+    return the search keywords found in the paper.
+    input:
+        keywords_elem: (lists) of lxml elements.
+        ns: (dict) of namespaces.
+    returns: 
+        list of keywords or empty.
+    """
+    keywords = []
+    for elem in keywords_elem:
+        if elem != None:
+            term = elem.text
+            keywords.append(term)
+    return keywords
+
+
+def get_paper_metadata(header, root,ns):
+    """
+    Function that combines all metadata found in the paper: title, publication date, authors and keywords.
+    input:
+        header: xlmx element of the header section.
+        root: xlmx element of the whole paper.
+        ns: (dict) of namespaces
+    return:
+        dictionary of metadata.
+    """
+    meta_data = {}
+    # get the header section.
+    header = root.find('tei:teiHeader', ns)
+    # get paper title.
+    title = header.findtext("tei:fileDesc/tei:titleStmt/tei:title",default="",namespaces=ns)
+    # get publication date.
+    publication_date = header.findtext("tei:fileDesc/tei:publicationStmt/tei:date",default="",namespaces=ns)
+    # list of authors
+    authors_xml = header.findall("tei:fileDesc/tei:sourceDesc/tei:biblStruct/tei:analytic/tei:author/tei:persName",ns)
+    authors = get_authors(authors_xml, ns)
+    # paper search keywords
+    keywords_xml = header.findall("tei:profileDesc/tei:textClass/tei:keywords/tei:term",ns)
+    keywords = get_keywords(keywords_xml,ns)
+    return {"title":title,
+           "date":publication_date,
+           "authors":authors,
+           "keywords":keywords}
+
+#################################### Reference section parsing ####################################
+
+
+    
+def process_coords(coords):
+    page = None
+    x = None
+    y = None
+    width = None
+    height = None
+    if coords:
+        first_box = coords.split(';')[0]
+        data_types = (int, float, float, float, float)
+        page, x, y, width, height = [d_type(val) for d_type, val in zip(data_types, first_box.split(","))]
+    return page, x, y, width, height
+
+def get_idno(bibl,ns):
+    """
+    get the identification number for each reference, if exsit.
+    Input:
+        bibl: xlmx element of a reference.
+        ns: (dict) of namespaces.
+    return: (dic) of doi and doi type.
+    """
+    identifier = {}
+        
+    arxiv_idno_elem = bibl.find(f".//tei:idno", namespaces=ns)
+    if arxiv_idno_elem is not None:
+        arxiv_idno = arxiv_idno_elem.text
+        identifier = {"doi":arxiv_idno,
+                     "type":"arxiv_id"}
+
+    doi_elem = bibl.find(f".//tei:analytic", namespaces=ns)
+    if doi_elem is not None:
+        doi = doi_elem.text
+        identifier = {"doi":doi,
+                     "type":doi_elem.get("type")}
+    return identifier
+    
+def extract_references(bibl_entries,short_citaions, ns):
+    """
+    Extract and parse the reference section of the paper.
+    Input:
+        bibl_entries: (list) of xlmx elements of bibliography tags.
+        short_citations: (set) in text citations.
+        ns: (dict) of namespaces.
+    Return:
+        list of dictionaries of all reference data.
+    """
+    
+    parsed_references = []
+
+    for bibl in bibl_entries:
+        tag_name = bibl.xpath('local-name()')
+        # Extract unique reference ID attribute (e.g., "b0", "b1")
+        ref_id = bibl.xpath('@xml:id', namespaces=ns)[0] if bibl.xpath('@xml:id', namespaces=ns) else bibl.get('id')
+        
+        # --- COORDINATE EXTRACTION ---
+        coords_str = bibl.get('coords')  
+        # Grobid can output multiple bounding boxes separated by semicolons
+        # We take the first bounding box to determine where the element begins
+        first_box = coords_str.split(';')[0]
+        page, x, y, width, height = process_coords(coords_str)
+       
+        # --- TITLE EXTRACTION ---
+        # Grobid splits titles: analytic title (paper name) vs monogr title (journal/book name)
+        title_analytic = bibl.findtext(f".//tei:analytic/tei:title", default="", namespaces=ns).strip()
+        title_monogr = bibl.findtext(f".//tei:monogr/tei:title", default="", namespaces=ns).strip()
+        
+        # If it's a journal paper, analytic title is the paper name. If it's a book, monogr is the main title.
+        main_title = title_analytic if title_analytic else title_monogr
+        venue = title_monogr if title_analytic else ""
+
+        # --- AUTHOR EXTRACTION ---
+        authors = []
+        # Find all author blocks inside this reference
+        for author_elem in bibl.findall(f".//tei:author", namespaces=ns):
+            # extract the full author name.
+            full_name = " ".join(author_elem.itertext()).strip()
+                
+            if full_name:
+                authors.append(full_name)
+
+        # --- METADATA EXTRACTION (Date, Volume, Issue, Pages) ---
+        # Date
+        date_elem = bibl.find(f".//tei:date", namespaces=ns)
+        year = ""
+        if date_elem is not None:
+            # Grobid often sets a 'when' attribute (e.g., when="2020")
+            year = date_elem.get('when') or "".join(date_elem.itertext()).strip()
+
+        # Volume, Issue, and Pages live under <biblScope> tags distinguished by a 'unit' attribute
+        volume = ""
+        issue = ""
+        pages = ""
+        for scope in bibl.findall(f".//tei:biblScope", namespaces=ns):
+            unit = scope.get('unit')
+            if unit == 'volume':
+                volume = "".join(scope.itertext()).strip()
+            elif unit == 'issue':
+                issue = "".join(scope.itertext()).strip()
+            elif unit == 'page':
+                # Can capture page ranges (e.g., "121-135")
+                from_p = scope.get('from', '')
+                to_p = scope.get('to', '')
+                pages = f"{from_p}-{to_p}" if from_p and to_p else "".join(scope.itertext()).strip()
+
+        # --- DIGITAL IDENTIFIERS (DOI, ArXiv ID) ---
+        
+        doi = get_idno(bibl, ns)
+        # use authors and the detected in text citations as anchors to remove false references like text in appendix.
+        if authors or (ref_id in short_citaions):
+            # if it passes the reference check then append it to the list.
+            parsed_references.append({
+                "tag_name": tag_name,
+                "text": {
+                    "title": main_title,
+                    "authors": authors,
+                    "venue": venue,
+                    "year": year,
+                    "volume": volume,
+                    "issue": issue,
+                    "pages": pages,
+                    "doi": doi
+                },
+                "target": ref_id, # reference id
+                "page": page,
+                "x": x,
+                "y": y,
+                "width": width,
+                "height": height,
+                "raw_coords": coords_str
+                
+            })
+    
+    return parsed_references
+
+    
+#################################### Main body ####################################
+def extract_text(all_divs, ns,section_type=None):
+    """
+    Extract the main text from div sections.
+    input:
+        all_divs: (list) of div tags.
+        ns: (dict) of namespaces.
+        section_type: (str) set the tag name could be: abstract or none.
+    return:
+        output: (list) of dicts of the extracted text and inline references.
+        short_citations: (set) of the inline paper references to be used as filter of false full citations parsing.
+    """
+    outputs = []
+    short_citations = []
+
+    for div in all_divs:
+        
+        # Loop through direct children (usually <p> or <head>)
+        for child in div:
+            tag_name = child.xpath('local-name()')
+            text = "".join(child.itertext())
+            coords = child.get("coords")
+            try:
+                page, x, y, width, height = process_coords(coords)
+            except:
+                logger.error(f"{Path(__file__).stem}: the coords was not processed correctly: page {page}, x: {x}, y: {y}, width: {width}, height: {height}")
+            # if section_type is none use the tag name from xlm.
+            
+            outputs.append({
+                    "tag_name":tag_name if section_type == None else section_type,
+                    "text":text,
+                    "target": None,
+                    "page":page,
+                    "x":x,
+                    "y":y,
+                    "width":width,
+                    "height":height,
+                    "raw_coords": coords
+                    
+                })
+            
+            refs = child.xpath('.//tei:ref', namespaces=ns)
+            
+            # Process the references found inside this paragraph/header
+            for ref in refs:
+                tag_name = ref.xpath('local-name()')
+                ref_text = ref.text
+                ref_target = ref.get("target")
+                ref_coords = ref.get("coords")
+                # get the citation in text.
+                if (ref_target) and (re.match(r"#b\d",ref_target)):
+                    short_citations.append(ref_target.replace("#",""))
+                try:
+                    page, x, y, width, height = process_coords(ref_coords)
+                except:
+                    logger.error(f"{Path(__file__).stem}: the coords was not processed correctly: page {page}, x: {x}, y: {y}, width: {width}, height: {height}")
+                    
+                outputs.append({
+                    "tag_name":tag_name,
+                    "text":ref_text,
+                    "target": ref_target,
+                    "page":page,
+                    "x":x,
+                    "y":y,
+                    "width":width,
+                    "height":height,
+                    "raw_coords":ref_coords
+                    
+                })
+    return outputs, set(short_citations)
+
+def paper_content(root,ns):
+    """
+    extract all information from the paper and combine them in a list.
+    input:
+        root: xlmx of the whole document.
+        ns: (dict) of namespaces.
+    return:
+        dict of all parsed content.
+    """
+    # extract the abstract
+    all_divs = root.xpath("//tei:teiHeader//tei:profileDesc//tei:abstract//tei:div",namespaces=ns)
+    abstract,_ = extract_text(all_divs, ns,section_type="abstract")
+    abstract = abstract[0]
+    # main body
+    all_divs = root.xpath('//tei:body/tei:div', namespaces=ns)
+    body_text, short_citaions = extract_text(all_divs, ns)
+    # back, retrive every element in back section except the bibliography list.
+    all_divs = root.xpath('//tei:back//*[not(ancestor-or-self::tei:listBibl)]', namespaces=ns)
+    back_text = extract_text(all_divs, ns)
+    # references section
+    bibl = root.xpath("//tei:back//tei:biblStruct",namespaces=ns)
+    bibliography = extract_references(bibl,short_citaions, ns)
+   
+    
+    return {"abstract":abstract, 
+           "body_text":body_text,
+           "back_text":back_text,
+            "bibliography":bibliography} 
+    
+
+def main(papers_dir,output_dir,n):
+    g_client = GrobidClient()
+    ns = {
+        'tei': "",
+        'xml': 'http://www.w3.org/XML/1998/namespace' 
+    }
     papers_content = []
+    # get the downloaded pdf papers.
+    papers_path = [str(file_name) for file_name in Path(papers_dir).glob("*.pdf")]
     try:
-        papers = utils.read_file(metadata_file)
-        for paper in papers:
-            paper_path = Path(papers_dir,paper['title']+".pdf").joinpath()
-            print(paper_path)
-            paper_content,total_images, total_tables,reference_pages = pdf_extraction(paper_path)
-            papers_content.append({"title":paper['title'], "content": paper_content, "pages_no": len(paper_content), "images_no":total_images, "tables_no":total_tables,"reference_pages":reference_pages})
+        # return a set of three values: title, status, and xml content.
+        xml_batch = g_client.process_documents("processFulltextDocument",papers_path,n=n,tei_coordinates=True,consolidate_citations=False)
+        
+        for xml_doc in xml_batch:
+            if xml_doc[1] == 200:
+                # start the processing 
+              
+                raw_xml_bytes = xml_doc[2].encode('utf-8')
+                root = ET.fromstring(raw_xml_bytes)
+                ns["tei"] = root.tag.split('}')[0].strip('{') if '}' in root.tag else "http://www.tei-c.org/ns/1.0"
+                output = paper_content(root,ns)
+                papers_content.append({"title":xml_doc[0],"xml_content":output})
+        
         logger.info("successfully parsed all PDFs")
-    except pymupdf.FileNotFoundError as e:
+
+    except Exception as e:
         logger.error(f"{Path(__file__).stem}: {e}")
     finally: 
+        # store the parsed files.
         ms_timestamp = int(time.time() * 1000)
-        file_name = Path(config.DIRECTORY['DATA'],f"rag_{ms_timestamp}.json").joinpath()
+        file_name = Path(output_dir,f"rag_{ms_timestamp}.json").joinpath()
         utils.write_file(file_name, papers_content)
 
-
-
 if __name__ == "__main__":
-    # take certain arguments, like the titles.
-    metadata_file = Path(config.DIRECTORY["DATA"],"arxiv_data.json").joinpath()
+    output_dir = config.DIRECTORY['DATA']
     papers_dir = config.DIRECTORY["PAPERS_DIR"]
-    parsing_papers(metadata_file,papers_dir)
+    # number of documents processed in parallel.
+    n = config.GROBID["n_parallel"]
+    main(papers_dir,output_dir,n)
