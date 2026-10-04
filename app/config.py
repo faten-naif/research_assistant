@@ -26,12 +26,15 @@ VECTOR_DB = {
     "HOST":"http://localhost:19530",
     "TOKEN":"root:Milvus",
     "DB_NAME":"arxiv_db",
-    "COLLECTION_NAME":"papers_text",
+    #"COLLECTION_NAME":"papers_text",
+    "COLLECTION_NAME":"research_papers",
     "EMBEDDING_MODEL":"Qwen/Qwen3-Embedding-0.6B",
     
 }
 
 ENV = "PROD"
+SIMILARITY_THRESHOLD = 0.7
+# Embedding settings
 EMBEDDING = {
     "MODEL_NAME":"Qwen/Qwen3-Embedding-0.6B",
     "HOST":"127.0.0.1",
@@ -41,7 +44,28 @@ EMBEDDING = {
     "EMBEDDING_DIM":1024,
     
 }
-# LLM serving
+# LLM 
+LLM_SETTINGS = {
+    "MODEL_NAME":"Qwen3.8-2B-BF16",
+    "TEMPERATURE":0.5,
+    "URL":"http://127.0.0.1:8003/v1",
+    "SEED":42
+}
+
+MLFLOW = {
+    "URL":"http://localhost:5000",
+    "EXPERIMENT":"CrewAI_3"
+    
+}
+
+AGENT_PROMPTS = {
+    "ROUTER": "Router_prompt_v1"
+}
+
+GROBID = {
+    "n_parallel": 5,
+    
+}
 # Embedding serving.
 # VECTOR_DB = {
 #     "PROVIDER": "chroma",
