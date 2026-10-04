@@ -1,9 +1,9 @@
 import json
 from pathlib import Path
-import config
+import config as config
 import logging
 import time
-
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ def write_file(file_name, data):
     
     if file_type == 'json':
         with open(file_name,"w",encoding="utf-8") as file:
-            json.dump(data, file, indent=4)
+            json.dump(data, file, default=lambda obj: list(obj) if isinstance(obj, set) else str(obj), indent=4)
             logger.info("json saved successfully")
             
     elif file_type == "pdf":
@@ -71,3 +71,13 @@ def logs():
     datefmt="%Y-%m-%d %H:%M:%S",
     level=logging.DEBUG
 )
+
+def preprocess_title(metadata):
+    """
+    Remove not allowed symboles in file names
+    metadata: (list) metadata of relevent papers.
+    """
+    for data in metadata:
+        new_title = re.sub("/|\\|\.","-",data["title"])
+        data["title"] = new_title
+    return metadata

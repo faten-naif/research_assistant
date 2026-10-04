@@ -1,9 +1,10 @@
 # responsible for handling the download operations handling any exceptions that could rise. 
-import utils
+import app.utils as utils
 import requests
-import config
+import app.config as config
 import logging
 from pathlib import Path 
+from tqdm import tqdm
 logger = logging.getLogger(__name__)
 
 def download_pdf_files(paper,directory):
@@ -12,6 +13,8 @@ def download_pdf_files(paper,directory):
     args:
         paper: (dict) metadata about the paper.
         directory: (str) storage location.
+    returns:
+        download_status: sucess/fail
     """
     response = requests.get(paper["pdf_url"])
     title = paper["title"]
@@ -21,9 +24,11 @@ def download_pdf_files(paper,directory):
         # put this function in utils.
         file_name = Path(directory,title).joinpath()
         utils.write_file(file_name, response.content)
-        # with open(f"{directory}/{title}", "wb") as file:
-        #     file.write(response.content)
         logger.info(f"{title} was downloaded successfully")
+        return "success"
+    else:
+        logger.warning(f"status_code: {response.status_code}, Could not download: {title}")
+        return "fail"
     #return title
 
 def donwload_papers(file_name, directory):
@@ -35,15 +40,17 @@ def donwload_papers(file_name, directory):
     """
     try:
         metadata = utils.read_file(file_name)
-        #print(metadata)
-        for paper in metadata:
+        for paper in tqdm(metadata):
             # if the paper was downloaded then skip.
             if Path(directory,paper["title"]+".pdf").exists():
                 logger.info(f"{paper['title']} already exists.")
                 continue
-            download_pdf_files(paper, directory)
+            download_status = download_pdf_files(paper, directory)
+            paper["download_status"] = download_status
     except requests.exceptions.ChunkedEncodingError as e:
         logger.error(f"{Path(__file__).stem}: {e}")
+    finally:
+        utils.write_file(file_name, metadata)
 
 
 
