@@ -8,18 +8,19 @@ from tqdm import tqdm
 import math
 from grobid_client.grobid_client import GrobidClient
 from lxml import etree as ET 
+
 # responsible for the extraction of the papers and storing them as json file. 
 
 logger = logging.getLogger(__name__)
 
 #################################### Metadata ####################################
-def get_authors(authors_elem, ns):
+def get_authors(authors_elem, ns) -> list:
     """
     Retrive the paper authors' names
-    input: 
+    Args: 
         authors_elem: (list) of lxml elements.
         ns: (dict) of namespaces.
-    returns: 
+    Returns: 
         list of authors full name or empty.
     """
     authors_list = []
@@ -30,13 +31,13 @@ def get_authors(authors_elem, ns):
         authors_list.append({"forename":forename,"surname":surname})
     return authors_list
     
-def get_keywords(keywords_elem, ns):
+def get_keywords(keywords_elem, ns) -> list:
     """
     return the search keywords found in the paper.
-    input:
+    Args:
         keywords_elem: (lists) of lxml elements.
         ns: (dict) of namespaces.
-    returns: 
+    Returns: 
         list of keywords or empty.
     """
     keywords = []
@@ -47,14 +48,14 @@ def get_keywords(keywords_elem, ns):
     return keywords
 
 
-def get_paper_metadata(header, root,ns):
+def get_paper_metadata(header, root,ns) -> dict:
     """
     Function that combines all metadata found in the paper: title, publication date, authors and keywords.
-    input:
+    Args:
         header: xlmx element of the header section.
         root: xlmx element of the whole paper.
         ns: (dict) of namespaces
-    return:
+    Returns:
         dictionary of metadata.
     """
     meta_data = {}
@@ -79,7 +80,14 @@ def get_paper_metadata(header, root,ns):
 
 
     
-def process_coords(coords):
+def process_coords(coords) -> set:
+    """
+    Parse the content of raw coordinates.
+    Args:
+        coords: (str) raw coordinates of the text
+    Returns:
+        five elements represent the location of the xml element within the page.
+    """
     page = None
     x = None
     y = None
@@ -91,13 +99,13 @@ def process_coords(coords):
         page, x, y, width, height = [d_type(val) for d_type, val in zip(data_types, first_box.split(","))]
     return page, x, y, width, height
 
-def get_idno(bibl,ns):
+def get_idno(bibl,ns) -> dict:
     """
     get the identification number for each reference, if exsit.
-    Input:
+    Args:
         bibl: xlmx element of a reference.
         ns: (dict) of namespaces.
-    return: (dic) of doi and doi type.
+    Returns: (dic) of doi and doi type.
     """
     identifier = {}
         
@@ -114,18 +122,18 @@ def get_idno(bibl,ns):
                      "type":doi_elem.get("type")}
     return identifier
     
-def extract_references(bibl_entries,short_citaions, ns):
+def extract_references(bibl_entries,short_citaions, ns) -> dict:
     """
     Extract and parse the reference section of the paper.
-    Input:
+    Args:
         bibl_entries: (list) of xlmx elements of bibliography tags.
         short_citations: (set) in text citations.
         ns: (dict) of namespaces.
-    Return:
+    Returns:
         list of dictionaries of all reference data.
     """
     
-    parsed_references = []
+    parsed_references = {}
 
     for bibl in bibl_entries:
         tag_name = bibl.xpath('local-name()')
@@ -187,8 +195,8 @@ def extract_references(bibl_entries,short_citaions, ns):
         doi = get_idno(bibl, ns)
         # use authors and the detected in text citations as anchors to remove false references like text in appendix.
         if authors or (ref_id in short_citaions):
-            # if it passes the reference check then append it to the list.
-            parsed_references.append({
+            # if it passes the reference check then add it to dict with target as key.
+            parsed_references[ref_id] = {
                 "tag_name": tag_name,
                 "text": {
                     "title": main_title,
@@ -200,7 +208,7 @@ def extract_references(bibl_entries,short_citaions, ns):
                     "pages": pages,
                     "doi": doi
                 },
-                "target": ref_id, # reference id
+                
                 "page": page,
                 "x": x,
                 "y": y,
@@ -208,20 +216,20 @@ def extract_references(bibl_entries,short_citaions, ns):
                 "height": height,
                 "raw_coords": coords_str
                 
-            })
+            }
     
     return parsed_references
 
     
 #################################### Main body ####################################
-def extract_text(all_divs, ns,section_type=None):
+def extract_text(all_divs, ns,section_type=None) -> (list, set) :
     """
     Extract the main text from div sections.
-    input:
+    Args:
         all_divs: (list) of div tags.
         ns: (dict) of namespaces.
         section_type: (str) set the tag name could be: abstract or none.
-    return:
+    Returns:
         output: (list) of dicts of the extracted text and inline references.
         short_citations: (set) of the inline paper references to be used as filter of false full citations parsing.
     """
@@ -283,14 +291,67 @@ def extract_text(all_divs, ns,section_type=None):
                     
                 })
     return outputs, set(short_citations)
+# iterate and map reference and links metadata into the dict.
+def map_references(body,bibliography) -> list:
+    """
+    Map in-text references to their corresponding full reference entries in the bibliography.
+    Args: 
+        body (list): A list of dictionaries representing extracted XML elements. 
+        bibliography (list): A list of reference entries from the bibliography section.
+    Returns: 
+        body: A list of text elements enriched with the corresponding reference metadata. 
+        
+    """
+    # iterate over all elements. These contain text and in-text references
+    for index in range(len(body)):
+        try:
+            if index >= len(body):
+                break
+            text = body[index]
+            # initialize the variables for references and url links.
+            ref_data = {}
+            url_links  = []
+            # search for reference tag-name within the elements.
+            while text["tag_name"] == "ref":
+                
+                
+                target = text["target"]
+                # target is a unique id that map the in-text reference to the reference entry in bibliography.
+                if target != None:
+                    if re.match("#b\d+",target):
+                        # get the metadata related to the reference
+                        target = target.replace("#","")
+                        
+                        ref_data[target] = bibliography[target]
+                        ref_data[target]["inline_citation"] = text["text"]
+                    else:
+                        # in-text reference could be id or url.
+                        url_links.append(target)
+                # remove the ref elements from text list.
+                body.pop(index)
+                # if reached the end of the list, exit the loop.
+                if index >= len(body):
+                    break
+                text = body[index]
+                
+            # add the enriched references and url to the text element dict as new key.
+            if ref_data:
+                body[index-1]["references"] = ref_data
+            if url_links:
+                body[index-1]["url_links"] = url_links
+            
+        except Exception as e:
+            logger.error(msg=f"{Path(__file__).stem}: {e}",info={"index":index,"list_len":len(body),"text":text})
+            
+    return body
 
-def paper_content(root,ns):
+def paper_content(root,ns) -> dict:
     """
     extract all information from the paper and combine them in a list.
-    input:
+    Args:
         root: xlmx of the whole document.
         ns: (dict) of namespaces.
-    return:
+    Returns:
         dict of all parsed content.
     """
     # extract the abstract
@@ -302,11 +363,14 @@ def paper_content(root,ns):
     body_text, short_citaions = extract_text(all_divs, ns)
     # back, retrive every element in back section except the bibliography list.
     all_divs = root.xpath('//tei:back//*[not(ancestor-or-self::tei:listBibl)]', namespaces=ns)
-    back_text = extract_text(all_divs, ns)
+    back_text,_ = extract_text(all_divs, ns)
     # references section
     bibl = root.xpath("//tei:back//tei:biblStruct",namespaces=ns)
     bibliography = extract_references(bibl,short_citaions, ns)
-   
+
+    # map in-text references to the full reference info.
+    body_text = map_references(body_text,bibliography)
+    back_text = map_references(back_text,bibliography)
     
     return {"abstract":abstract, 
            "body_text":body_text,
@@ -314,6 +378,7 @@ def paper_content(root,ns):
             "bibliography":bibliography} 
     
 
+    
 def main(papers_dir,output_dir,n):
     g_client = GrobidClient()
     ns = {
@@ -341,6 +406,7 @@ def main(papers_dir,output_dir,n):
 
     except Exception as e:
         logger.error(f"{Path(__file__).stem}: {e}")
+        
     finally: 
         # store the parsed files.
         ms_timestamp = int(time.time() * 1000)
