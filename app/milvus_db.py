@@ -1,7 +1,7 @@
 from pymilvus import MilvusClient, DataType
 from sentence_transformers import SentenceTransformer
 from transformers import AutoConfig
-import config
+import config as config
 import logging
 import datetime
 from pathlib import Path
