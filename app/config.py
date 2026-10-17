@@ -57,10 +57,8 @@ MLFLOW = {
     "EXPERIMENT":"CrewAI_3"
     
 }
-
-AGENT_PROMPTS = {
-    "ROUTER": "Router_prompt_v1"
-}
+# these are loaded from mlflow into json file. to keep track of the prompts and allow portability
+PROMPTS_FILE = "prompts.json"
 
 GROBID = {
     "n_parallel": 5,
