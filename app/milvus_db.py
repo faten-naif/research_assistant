@@ -26,6 +26,7 @@ class Milvus:
         self.collection_name: str = config.VECTOR_DB["COLLECTION_NAME"]
         self.env: str = config.ENV
         self.embedding_dim: int = config.EMBEDDING["EMBEDDING_DIM"]
+        self.recreate_db: bool = config.VECTOR_DB["RECREATE"]
         self.embedding_api = f"http://{config.EMBEDDING['HOST']}:{config.EMBEDDING['PORT']}/v1"
         logger.info(f"MilvusClient initialized: host={self.host}, db={self.db_name}, collection={self.collection_name}")
     
@@ -61,12 +62,17 @@ class Milvus:
         """
         schema = MilvusClient.create_schema(auto_id=True, enable_dynamic_field=True)
         schema.add_field(field_name="id", datatype=DataType.INT64, is_primary=True, auto_id=True)
+        schema.add_field(field_name="page_no", datatype=DataType.INT64, default_value=0)
+        schema.add_field(field_name="chunk_no", datatype=DataType.INT64, default_value=0)
+        schema.add_field(field_name="heading", datatype=DataType.VARCHAR,max_length=2000, default_value="")
         schema.add_field(field_name="title", datatype=DataType.VARCHAR, max_length=500, default_value="")
         schema.add_field(field_name="title_embedding", datatype=DataType.FLOAT_VECTOR, dim=self.embedding_dim)
-        schema.add_field(field_name="content", datatype=DataType.VARCHAR, max_length=2000, default_value="")
+        schema.add_field(field_name="content", datatype=DataType.VARCHAR,max_length=5000, default_value="")
         schema.add_field(field_name="content_embedding", datatype=DataType.FLOAT_VECTOR, dim=self.embedding_dim)
         schema.add_field(field_name="inserted_at", datatype=DataType.TIMESTAMPTZ,nullable=True)
-        
+        schema.add_field(field_name="references", datatype=DataType.JSON, nullable=True)
+
+
         index_params = self.client.prepare_index_params()
         index_params.add_index(
             field_name="content_embedding",
@@ -82,7 +88,7 @@ class Milvus:
         )
         
         # Recreate collection in dev environment
-        if self.env == "dev":
+        if self.recreate_db:
             try:
                 self.client.drop_collection(collection_name=self.collection_name)
                 logger.info(f"Collection dropped in dev mode: {self.collection_name}")
@@ -122,7 +128,7 @@ class Milvus:
         Insert records into the collection.
         
         Args:
-            data: List of dictionaries with keys: title, content, title_embedding, content_embedding
+            data: List of dictionaries with keys: title, content, page_no, chunk_no, headings, references
             enable_dynamic: Allow dynamic fields
         
         Returns:
@@ -134,35 +140,53 @@ class Milvus:
         
         # Extract embeddings from data
         records = []
-        for record in data:
-            title = record.get("title", "")
-            content = record.get("content", "")
-            # convert chunk and paper title to embeddings.
-            response = self.embedding_request([title,content])
+
+        for paper in data:
+            for chunk in paper["chunks"]:
+                title = chunk.get("title", "")
+                content = chunk.get("content", "")
+                page_no = chunk.get("page_no",0)
+                chunk_no = chunk.get("chunk_no",0)
+                heading = chunk.get("heading","")
+                references = chunk.get("references")
             
-            if response["status_code"] == 200:
-                title_embedding,content_embedding = response["embeddings"]
-                records.append({
-                    "title": title, 
-                    "content": content,
-                    "title_embedding": title_embedding, 
-                    "content_embedding": content_embedding,
-                    "inserted_at":str(datetime.datetime.today())
-                })
+                # convert chunk and paper title to embeddings.
+                response = self.embedding_request([title,content])
+                
+                if response["status_code"] == 200:
+                    title_embedding,content_embedding = response["embeddings"]
+                    records.append({
+                        "page_no": page_no,
+                        "chunk_no":chunk_no,
+                        "title": title, 
+                        "content": content,
+                        "title_embedding": title_embedding, 
+                        "content_embedding": content_embedding,
+                        "inserted_at":str(datetime.datetime.today()),
+                        "references": references,
+                    
+                    })
+                # TODO: IF NO RESPONSE RAISE EXCEPTION.
             
-            # Insert using MilvusClient insert method
-            result = self.client.insert(
-                collection_name=self.collection_name,
-                data=records,
-                enable_dynamic_field=enable_dynamic
-            )
-            self.client.flush(collection_name=self.collection_name)
-    
-            logger.info(f"Inserted {len(records)} records into {self.collection_name}")
-            return len(records)
-            
-        logger.error(f"{Path(__file__).stem}: embedding request failed {response['message']}")
-        return 0
+        # Insert using MilvusClient insert method
+        result = self.client.insert(
+            collection_name=self.collection_name,
+            data=records,
+            enable_dynamic_field=enable_dynamic
+        )
+        self.client.flush(collection_name=self.collection_name)
+
+        logger.info(f"Inserted {len(records)} records into {self.collection_name}")
+        return {"status": "success",
+                "data":{"records": len(records)
+                       }
+               }
+        # TODO: this is weird line??? 
+        # logger.error(f"{Path(__file__).stem}: embedding request failed {response['message']}")
+        # return {"status": "fail",
+        #             "data":{"error_msg": f"embedding request failed {response['message']}"
+        #                    }
+        #        }
 # it uses filttering to get the results not embedding
     def query(
         self,
