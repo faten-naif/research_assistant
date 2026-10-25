@@ -4,7 +4,7 @@ import config as config
 import logging
 import time
 import re
-
+import shutil
 logger = logging.getLogger(__name__)
 
 def write_file(file_name, data):
@@ -81,3 +81,21 @@ def preprocess_title(metadata):
         new_title = re.sub("/|\\|\.","-",data["title"])
         data["title"] = new_title
     return metadata
+
+def cleanup_temp_dir(user_dir):
+    if config.CLEAN_UP:
+        user_dir = Path(user_dir)
+        if user_dir.exists():
+            #shutil.rmtree(user_dir)
+            logger.info(f"remove user dir {user_dir}")
+        else:
+            logger.info(f"{user_dir} does not exists")
+        
+    return {
+        "status":"success",
+        "data":{}
+    }
+    # this function delete all files and folders after storing the data in vector db.
+    # how can we create a folder for the user ID
+    # this function should be toggled in env.
+    
