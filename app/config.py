@@ -3,9 +3,10 @@ from pathlib import Path
 
 # Storage Settings
 DIRECTORY = {
-    "DATA":Path("..","data").joinpath(),
-    "PAPERS_DIR":Path("..","data","documents").joinpath(),
-    "IMAGES":Path("..","data","images").joinpath(),
+    "TEMP": Path("..","temp").joinpath(),
+    "DATA":"data",
+    "PAPERS_DIR":Path("data","documents").joinpath(),
+    "IMAGES":Path("data","images").joinpath(),
     "LOGS":Path("..","logs").joinpath(),
 }
 
@@ -29,10 +30,11 @@ VECTOR_DB = {
     #"COLLECTION_NAME":"papers_text",
     "COLLECTION_NAME":"research_papers",
     "EMBEDDING_MODEL":"Qwen/Qwen3-Embedding-0.6B",
+    "RECREATE":True,
     
 }
 
-ENV = "PROD"
+ENV = "DEV"
 SIMILARITY_THRESHOLD = 0.7
 # Embedding settings
 EMBEDDING = {
@@ -57,6 +59,7 @@ MLFLOW = {
     "EXPERIMENT":"CrewAI_3"
     
 }
+CLEAN_UP = False
 # these are loaded from mlflow into json file. to keep track of the prompts and allow portability
 PROMPTS_FILE = "prompts.json"
 
